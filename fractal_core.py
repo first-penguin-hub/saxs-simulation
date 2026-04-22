@@ -277,7 +277,7 @@ def generate_shell_cluster_target_rg(
 def pair_distances(pos: np.ndarray) -> np.ndarray:
     """All unique pair distances r_ij for i < j."""
     diff = pos[:, None, :] - pos[None, :, :]
-    D = np.sqrt(np.sum(diff**2, axis=2))
+    D = np.sqrt(np.sum(diff * diff, axis=2))
     iu = np.triu_indices(len(pos), k=1)
     return D[iu]
 
@@ -307,7 +307,7 @@ def scattering_from_positions(
 
     radius_nm = d_nm / 2.0
     F_q = sphere_form_factor_amplitude(q, radius_nm)
-    P_q = F_q**2
+    P_q = F_q ** 2
 
     I_q = P_q * S_q
     if I_q[0] == 0:
@@ -388,8 +388,14 @@ def fit_guinier_iterative(
 
 def fit_mass_fractal_dimension(r: np.ndarray) -> Tuple[float, float]:
     """Diagnostic fit of cumulative N(<r) ~ r^Df from generated positions."""
-    rr = np.sort(r)
-    Ncum = np.arange(1, len(rr) + 1)
+    rr = np.asarray(r, dtype=float)
+    rr = rr[np.isfinite(rr)]
+    rr = rr[rr > 0]
+    if rr.size < 8:
+        raise ValueError("Need at least 8 positive radii to fit an effective fractal dimension.")
+
+    rr = np.sort(rr)
+    Ncum = np.arange(1, len(rr) + 1, dtype=float)
 
     lo = max(3, int(0.05 * len(rr)))
     hi = max(lo + 3, int(0.90 * len(rr)))
@@ -397,7 +403,7 @@ def fit_mass_fractal_dimension(r: np.ndarray) -> Tuple[float, float]:
     y = np.log(Ncum[lo:hi])
 
     coef = np.polyfit(x, y, 1)
-    return coef[0], coef[1]
+    return float(coef[0]), float(coef[1])
 
 
 def radial_concentration_profile(
