@@ -7,7 +7,7 @@ import numpy as np
 
 
 # ============================================================
-# Core numerical functions
+# Shared numerical functions
 # ============================================================
 
 def sphere_form_factor_amplitude(q: np.ndarray, radius_nm: float) -> np.ndarray:
@@ -18,7 +18,6 @@ def sphere_form_factor_amplitude(q: np.ndarray, radius_nm: float) -> np.ndarray:
     xm = x[mask]
     F[mask] = 3.0 * (np.sin(xm) - xm * np.cos(xm)) / (xm ** 3)
     return F
-
 
 
 def sample_fractal_radii(
@@ -33,13 +32,25 @@ def sample_fractal_radii(
     return r
 
 
+def sample_shell_radii(
+    n: int,
+    R_nm: float,
+    alpha: float,
+    rng: np.random.Generator,
+) -> np.ndarray:
+    """Sample radii with radial PDF p(r) ∝ r^alpha on [0, R_nm]."""
+    if alpha <= -1:
+        raise ValueError("alpha must be > -1.")
+    u = rng.random(n)
+    r = R_nm * np.power(u, 1.0 / (alpha + 1.0))
+    return r
+
 
 def sample_unit_vectors(n: int, rng: np.random.Generator) -> np.ndarray:
     v = rng.normal(size=(n, 3))
     norms = np.linalg.norm(v, axis=1, keepdims=True)
     norms[norms == 0] = 1.0
     return v / norms
-
 
 
 def estimate_max_particles(
@@ -53,6 +64,31 @@ def estimate_max_particles(
     return packing_fraction * V_cluster / V_particle
 
 
+def sphere_rg_uniform(R_nm: float) -> float:
+    """Radius of gyration of a uniform solid sphere of radius R_nm."""
+    return np.sqrt(3.0 / 5.0) * R_nm
+
+
+def max_center_radius(R_nm: float, d_nm: float) -> float:
+    """Maximum allowed radius for particle centers inside the container sphere."""
+    return R_nm - d_nm / 2.0
+
+
+def max_accessible_rg(R_nm: float, d_nm: float) -> float:
+    """Practical upper bound if centers are concentrated near the outer edge."""
+    return max_center_radius(R_nm, d_nm)
+
+
+def _validate_cluster_inputs(R_nm: float, d_nm: float, n_particles: int) -> float:
+    if d_nm >= 2 * R_nm:
+        raise ValueError("Particle diameter is too large for the chosen cluster radius.")
+    if n_particles < 1:
+        raise ValueError("n_particles must be >= 1.")
+    R_center_max = max_center_radius(R_nm, d_nm)
+    if R_center_max <= 0:
+        raise ValueError("R - d/2 must be positive.")
+    return R_center_max
+
 
 def generate_fractal_cluster(
     R_nm: float,
@@ -62,27 +98,14 @@ def generate_fractal_cluster(
     seed: int = 2026,
     max_trials: int = 500000,
 ) -> np.ndarray:
-    """
-    Generate an approximate finite mass-fractal cluster in a sphere of radius R_nm.
-
-    Conditions:
-      - particle centers stay within radius (R - d/2)
-      - no overlaps: center-center distance >= d
-      - radial sampling follows N(r) ~ r^Df approximately
-    """
+    """Generate an approximate finite mass-fractal cluster in a sphere."""
     if Df <= 0:
         raise ValueError("Df must be > 0.")
     if Df > 3:
         raise ValueError("Df should be <= 3 for a 3D mass fractal.")
-    if d_nm >= 2 * R_nm:
-        raise ValueError("Particle diameter is too large for the chosen cluster radius.")
-    if n_particles < 1:
-        raise ValueError("n_particles must be >= 1.")
 
+    R_center_max = _validate_cluster_inputs(R_nm, d_nm, n_particles)
     rng = np.random.default_rng(seed)
-    R_center_max = R_nm - d_nm / 2.0
-    if R_center_max <= 0:
-        raise ValueError("R - d/2 must be positive.")
 
     n_fit_est = estimate_max_particles(R_nm, d_nm)
     if n_particles > n_fit_est:
@@ -122,6 +145,134 @@ def generate_fractal_cluster(
     return pos
 
 
+def generate_shell_cluster(
+    R_nm: float,
+    d_nm: float,
+    n_particles: int,
+    alpha: float,
+    seed: int = 2026,
+    max_trials: int = 500000,
+) -> np.ndarray:
+    """Generate a center-depleted / shell-like cluster in a sphere."""
+    if alpha <= -1:
+        raise ValueError("alpha must be > -1.")
+
+    R_center_max = _validate_cluster_inputs(R_nm, d_nm, n_particles)
+    rng = np.random.default_rng(seed)
+
+    n_fit_est = estimate_max_particles(R_nm, d_nm)
+    if n_particles > n_fit_est:
+        print(
+            f"[warning] n={n_particles} may be geometrically too dense for "
+            f"R={R_nm:.1f} nm, d={d_nm:.1f} nm. Rough soft limit ~ {n_fit_est:.0f} particles."
+        )
+
+    pos = np.empty((0, 3), dtype=float)
+    accepted = 0
+    trials = 0
+
+    while accepted < n_particles and trials < max_trials:
+        trials += 1
+
+        r = sample_shell_radii(1, R_center_max, alpha, rng)[0]
+        u = sample_unit_vectors(1, rng)[0]
+        cand = r * u
+
+        if accepted == 0:
+            pos = np.vstack([pos, cand])
+            accepted += 1
+            continue
+
+        dr = pos - cand
+        dist2 = np.sum(dr * dr, axis=1)
+        if np.all(dist2 >= d_nm**2):
+            pos = np.vstack([pos, cand])
+            accepted += 1
+
+    if accepted < n_particles:
+        raise RuntimeError(
+            f"Could only place {accepted}/{n_particles} particles without overlap "
+            f"after {trials} trials. Increase R, decrease d or n, or increase max_trials."
+        )
+
+    return pos
+
+
+def generate_shell_cluster_target_rg(
+    R_nm: float,
+    d_nm: float,
+    n_particles: int,
+    Rg_target_nm: float,
+    seed: int = 2026,
+    max_trials: int = 500000,
+    alpha_min: float = 2.0,
+    alpha_max: float = 120.0,
+    tolerance_nm: float = 1.0,
+    max_iter: int = 16,
+) -> Tuple[np.ndarray, Dict[str, float]]:
+    """
+    Tune a shell-like radial distribution p(r) ∝ r^alpha so that the generated
+    cluster approaches the requested radius of gyration.
+    """
+    R_center_max = _validate_cluster_inputs(R_nm, d_nm, n_particles)
+    rg_uniform = sphere_rg_uniform(R_nm)
+    rg_upper = max_accessible_rg(R_nm, d_nm)
+
+    if Rg_target_nm <= rg_uniform:
+        raise ValueError(
+            f"Rg_target_nm must be larger than the uniform-sphere value ({rg_uniform:.3f} nm)."
+        )
+    if Rg_target_nm >= rg_upper:
+        raise ValueError(
+            f"Rg_target_nm must be smaller than the practical upper bound ({rg_upper:.3f} nm)."
+        )
+
+    best_pos = None
+    best_info: Dict[str, float] | None = None
+    lo = alpha_min
+    hi = alpha_max
+
+    for i in range(max_iter):
+        alpha = 0.5 * (lo + hi)
+        pos = generate_shell_cluster(
+            R_nm=R_nm,
+            d_nm=d_nm,
+            n_particles=n_particles,
+            alpha=alpha,
+            seed=seed + i,
+            max_trials=max_trials,
+        )
+        rg = compute_rg_from_positions(pos)
+        err = rg - Rg_target_nm
+
+        info = {
+            "alpha": float(alpha),
+            "Rg_target_nm": float(Rg_target_nm),
+            "Rg_real_nm": float(rg),
+            "Rg_uniform_sphere_nm": float(rg_uniform),
+            "Rg_upper_bound_nm": float(rg_upper),
+            "R_center_max_nm": float(R_center_max),
+            "abs_error_nm": float(abs(err)),
+            "iterations_used": int(i + 1),
+        }
+
+        if best_info is None or abs(err) < best_info["abs_error_nm"]:
+            best_pos = pos
+            best_info = info
+
+        if abs(err) <= tolerance_nm:
+            break
+
+        if err < 0:
+            lo = alpha
+        else:
+            hi = alpha
+
+    if best_pos is None or best_info is None:
+        raise RuntimeError("Failed to generate a shell-like cluster for the requested Rg.")
+
+    return best_pos, best_info
+
 
 def pair_distances(pos: np.ndarray) -> np.ndarray:
     """All unique pair distances r_ij for i < j."""
@@ -131,7 +282,6 @@ def pair_distances(pos: np.ndarray) -> np.ndarray:
     return D[iu]
 
 
-
 def compute_rg_from_positions(pos: np.ndarray) -> float:
     """Radius of gyration from coordinates."""
     com = pos.mean(axis=0)
@@ -139,22 +289,12 @@ def compute_rg_from_positions(pos: np.ndarray) -> float:
     return np.sqrt(rg2)
 
 
-
 def scattering_from_positions(
     pos: np.ndarray,
     d_nm: float,
     q: np.ndarray,
 ) -> np.ndarray:
-    """
-    Compute normalized scattering intensity:
-      I(q) = P(q) * S(q)
-
-    where
-      S(q) = 1 + 2/N * sum_{i<j} sin(q r_ij)/(q r_ij)
-      P(q) = sphere form factor intensity for diameter d
-
-    I(q) is normalized such that I(0)=1.
-    """
+    """Compute normalized scattering intensity I(q) = P(q) S(q)."""
     n = len(pos)
     rij = pair_distances(pos)
 
@@ -187,7 +327,6 @@ class GuinierFitResult:
     mask: np.ndarray
 
 
-
 def fit_guinier_iterative(
     q: np.ndarray,
     I: np.ndarray,
@@ -196,12 +335,7 @@ def fit_guinier_iterative(
     min_points: int = 8,
     max_iter: int = 20,
 ) -> GuinierFitResult:
-    """
-    Iterative Guinier fit:
-      ln I(q) = ln I0 - (Rg^2 / 3) q^2
-
-    The fit region is updated so that q_max ~ qRg_limit / Rg.
-    """
+    """Iterative Guinier fit: ln I(q) = ln I0 - (Rg^2/3) q^2."""
     qmax = qmax_init
 
     q_sorted = np.sort(q[q > 0])
@@ -252,7 +386,6 @@ def fit_guinier_iterative(
     )
 
 
-
 def fit_mass_fractal_dimension(r: np.ndarray) -> Tuple[float, float]:
     """Diagnostic fit of cumulative N(<r) ~ r^Df from generated positions."""
     rr = np.sort(r)
@@ -267,13 +400,12 @@ def fit_mass_fractal_dimension(r: np.ndarray) -> Tuple[float, float]:
     return coef[0], coef[1]
 
 
-
 def radial_concentration_profile(
     pos: np.ndarray,
     R_nm: float,
     n_bins: int = 30,
 ) -> Dict[str, np.ndarray]:
-    """Compute radial concentration profile inside the cluster sphere."""
+    """Compute radial concentration profile inside the container sphere."""
     if n_bins < 2:
         raise ValueError("n_bins must be >= 2.")
 
@@ -295,7 +427,6 @@ def radial_concentration_profile(
         "count_fraction": count_fraction,
         "cumulative_fraction": cumulative_fraction,
     }
-
 
 
 def build_summary_dict(
