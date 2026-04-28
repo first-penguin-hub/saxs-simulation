@@ -424,3 +424,96 @@ def build_summary_dict(
         "Guinier_qmax_nm^-1": float(fit.qmax_used),
         "Guinier_n_points": int(fit.n_points),
     }
+
+
+def generate_shell_like_cluster(
+    R_nm: float,
+    R_shell_nm: float,
+    d_nm: float,
+    n_particles: int,
+    seed: int = 2026,
+    max_trials: int = 500000,
+    shell_width_factor: float = 2.0,
+) -> Tuple[np.ndarray, Dict[str, float]]:
+    """
+    Generate a shell-like particle configuration inside a sphere.
+
+    Input is intentionally simple: the user specifies only the shell center radius
+    R_shell_nm. The shell thickness is automatically set from the particle size:
+
+        shell_width_nm = shell_width_factor * d_nm
+        sigma_shell_nm = shell_width_nm / 2
+
+    Particle-center radii are sampled from a truncated normal distribution centered
+    at R_shell_nm and constrained to 0 <= r <= R_nm - d_nm/2. Hard-sphere overlap is
+    rejected.
+    """
+    if R_nm <= 0:
+        raise ValueError("R_nm must be positive.")
+    if d_nm <= 0:
+        raise ValueError("d_nm must be positive.")
+    if d_nm >= 2 * R_nm:
+        raise ValueError("Particle diameter is too large for the chosen container radius.")
+    if n_particles < 1:
+        raise ValueError("n_particles must be >= 1.")
+    if shell_width_factor <= 0:
+        raise ValueError("shell_width_factor must be positive.")
+
+    R_center_max = R_nm - d_nm / 2.0
+    if R_shell_nm < 0 or R_shell_nm > R_center_max:
+        raise ValueError(
+            f"R_shell_nm must satisfy 0 <= R_shell_nm <= R - d/2 = {R_center_max:.3f} nm."
+        )
+
+    shell_width_nm = shell_width_factor * d_nm
+    sigma_shell_nm = shell_width_nm / 2.0
+
+    rng = np.random.default_rng(seed)
+    pos = np.empty((0, 3), dtype=float)
+    accepted = 0
+    trials = 0
+
+    while accepted < n_particles and trials < max_trials:
+        trials += 1
+
+        # Truncated Gaussian radius around the target shell position.
+        r = rng.normal(loc=R_shell_nm, scale=sigma_shell_nm)
+        if r < 0.0 or r > R_center_max:
+            continue
+
+        u = sample_unit_vectors(1, rng)[0]
+        cand = r * u
+
+        if accepted == 0:
+            pos = np.vstack([pos, cand])
+            accepted += 1
+            continue
+
+        dr = pos - cand
+        dist2 = np.sum(dr * dr, axis=1)
+        if np.all(dist2 >= d_nm**2):
+            pos = np.vstack([pos, cand])
+            accepted += 1
+
+    if accepted < n_particles:
+        raise RuntimeError(
+            f"Could only place {accepted}/{n_particles} particles without overlap after {trials} trials. "
+            "For a shell-like structure, try increasing R, moving R_shell away from very small radii, "
+            "decreasing d or n, or increasing max_trials."
+        )
+
+    radii = np.sqrt(np.sum(pos**2, axis=1))
+    info = {
+        "R_nm": float(R_nm),
+        "R_shell_nm": float(R_shell_nm),
+        "shell_width_nm_auto": float(shell_width_nm),
+        "sigma_shell_nm": float(sigma_shell_nm),
+        "d_nm": float(d_nm),
+        "n_particles": int(n_particles),
+        "r_mean_nm": float(np.mean(radii)),
+        "r_std_nm": float(np.std(radii)),
+        "r_min_nm": float(np.min(radii)),
+        "r_max_nm": float(np.max(radii)),
+        "R_center_max_nm": float(R_center_max),
+    }
+    return pos, info

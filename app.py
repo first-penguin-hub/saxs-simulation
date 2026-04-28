@@ -13,6 +13,7 @@ from fractal_core import (
     fit_mass_fractal_dimension,
     generate_fractal_cluster_with_target_rg,
     generate_fractal_cluster_with_reff,
+    generate_shell_like_cluster,
     infer_reff_from_rg_target,
     radial_concentration_profile,
     scattering_from_positions,
@@ -50,8 +51,7 @@ def init_state() -> None:
         "n_q_saxs": 250,
         "max_trials_saxs": 500000,
         "R_nm_rad": 300.0,
-        "Df_rad": 2.2,
-        "Rg_target_rad": 180.0,
+        "R_shell_nm_rad": 240.0,
         "d_nm_rad": 20.0,
         "n_particles_rad": 500,
         "seed_rad": 2026,
@@ -60,8 +60,6 @@ def init_state() -> None:
         "n_q_rad": 250,
         "max_trials_rad": 500000,
         "n_bins_rad": 40,
-        "rg_tolerance_rad": 2.0,
-        "search_max_iter_rad": 12,
         "run_saxs": False,
         "run_rad": False,
     }
@@ -95,22 +93,27 @@ with st.sidebar:
         st.session_state["run_saxs"] = st.button("Run Fractal SAXS", type="primary", use_container_width=True)
 
     else:
-        st.header("Radial Profile parameters")
+        st.header("Shell-like Radial Profile parameters")
         st.session_state["R_nm_rad"] = st.number_input("Container radius R [nm]", min_value=1.0, value=float(st.session_state["R_nm_rad"]), step=10.0)
-        st.session_state["Df_rad"] = st.number_input("Target fractal dimension Df", min_value=0.1, max_value=3.0, value=float(st.session_state["Df_rad"]), step=0.1)
-        st.session_state["Rg_target_rad"] = st.number_input("Target radius of gyration Rg [nm]", min_value=0.1, value=float(st.session_state["Rg_target_rad"]), step=5.0)
         st.session_state["d_nm_rad"] = st.number_input("Particle diameter d [nm]", min_value=0.1, value=float(st.session_state["d_nm_rad"]), step=1.0)
+        R_center_max_rad = float(st.session_state["R_nm_rad"]) - float(st.session_state["d_nm_rad"]) / 2.0
+        st.session_state["R_shell_nm_rad"] = st.number_input(
+            "Shell center radius R_shell [nm]",
+            min_value=0.0,
+            max_value=max(0.0, R_center_max_rad),
+            value=min(float(st.session_state["R_shell_nm_rad"]), max(0.0, R_center_max_rad)),
+            step=10.0,
+        )
         st.session_state["n_particles_rad"] = st.number_input("Number of particles n", min_value=1, value=int(st.session_state["n_particles_rad"]), step=10)
+        st.caption("Shell width is set automatically as shell_width = 2 × d.")
         st.subheader("Optional calculation settings")
         st.session_state["seed_rad"] = st.number_input("Random seed", min_value=0, value=int(st.session_state["seed_rad"]), step=1)
         st.session_state["q_min_rad"] = st.number_input("q_min [nm^-1]", min_value=0.00001, value=float(st.session_state["q_min_rad"]), step=0.00010, format="%.5f")
         st.session_state["q_max_rad"] = st.number_input("q_max [nm^-1]", min_value=0.00010, value=float(st.session_state["q_max_rad"]), step=0.01000, format="%.5f")
         st.session_state["n_q_rad"] = st.number_input("Number of q points", min_value=10, value=int(st.session_state["n_q_rad"]), step=10)
         st.session_state["n_bins_rad"] = st.number_input("Number of radial bins", min_value=5, value=int(st.session_state["n_bins_rad"]), step=5)
-        st.session_state["rg_tolerance_rad"] = st.number_input("Rg tolerance [nm]", min_value=0.1, value=float(st.session_state["rg_tolerance_rad"]), step=0.5)
-        st.session_state["search_max_iter_rad"] = st.number_input("Max Rg search iterations", min_value=1, value=int(st.session_state["search_max_iter_rad"]), step=1)
         st.session_state["max_trials_rad"] = st.number_input("Max placement trials", min_value=1000, value=int(st.session_state["max_trials_rad"]), step=1000)
-        st.session_state["run_rad"] = st.button("Run Radial Profile", type="primary", use_container_width=True)
+        st.session_state["run_rad"] = st.button("Run Shell-like Radial Profile", type="primary", use_container_width=True)
 
 
 if mode == "Fractal SAXS":
@@ -231,74 +234,74 @@ Use this mode when you want to start from **R, Df, d, n** and inspect the struct
 
 else:
     R_center_max = float(st.session_state["R_nm_rad"]) - float(st.session_state["d_nm_rad"]) / 2.0
-    rg_max = theoretical_rg_for_radial_fractal(R_center_max, float(st.session_state["Df_rad"]))
+    auto_width = 2.0 * float(st.session_state["d_nm_rad"])
     st.markdown(
         r"""
-### Radial Profile
-This mode generates a **mass-fractal-like particle configuration** inside a sphere of radius $R$ by using both
-**target fractal dimension** $D_f$ and **target radius of gyration** $R_g$ as inputs.
+### Shell-like Radial Profile
+This mode generates a **non-fractal shell-like particle configuration** inside a sphere of radius $R$.
 
-Internally, the code keeps the radial scaling rule
-\[N(<r) \sim r^{D_f}\]
-while automatically tuning the **effective radial support** so that the generated structure approaches the requested $R_g$.
-
+Particle centers are biased around a shell radius $R_{shell}$ using a truncated Gaussian radial distribution.
+The shell thickness is not an input parameter; it is automatically set from particle diameter:
+"""
+    )
+    st.latex(r"shell\_width = 2d")
+    st.markdown(
+        r"""
 This mode outputs:
 - 3D configuration
 - radial number-density profile
 - cumulative fraction profile
 - scattering intensity $I(q)$
 - Guinier fit
-- fitted $D_f$ from the generated coordinates
+
+Use this mode to compare a **surface-biased / shell-like structure** against the mass-fractal model.
 """
     )
     st.markdown("### Feasibility check")
-    st.latex(r"R_{g,\max} \approx (R-d/2)\sqrt{\frac{D_f}{D_f+2}}")
     st.write(
-        f"For the current inputs, the approximate maximum achievable mass-fractal Rg is **{rg_max:.2f} nm**."
+        f"Particle centers must satisfy 0 ≤ R_shell ≤ R - d/2 = **{R_center_max:.2f} nm**. "
+        f"For the current inputs, the automatic shell width is **{auto_width:.2f} nm**."
     )
 
     if st.session_state.get("run_rad", False):
         try:
-            with st.spinner("Generating structure with target Rg and computing profiles..."):
-                pos, info = generate_fractal_cluster_with_target_rg(
+            with st.spinner("Generating shell-like structure and computing profiles..."):
+                pos, info = generate_shell_like_cluster(
                     R_nm=float(st.session_state["R_nm_rad"]),
-                    Df=float(st.session_state["Df_rad"]),
+                    R_shell_nm=float(st.session_state["R_shell_nm_rad"]),
                     d_nm=float(st.session_state["d_nm_rad"]),
                     n_particles=int(st.session_state["n_particles_rad"]),
-                    Rg_target_nm=float(st.session_state["Rg_target_rad"]),
                     seed=int(st.session_state["seed_rad"]),
                     max_trials=int(st.session_state["max_trials_rad"]),
-                    rg_tolerance_nm=float(st.session_state["rg_tolerance_rad"]),
-                    search_max_iter=int(st.session_state["search_max_iter_rad"]),
+                    shell_width_factor=2.0,
                 )
                 q = np.linspace(float(st.session_state["q_min_rad"]), float(st.session_state["q_max_rad"]), int(st.session_state["n_q_rad"]))
                 I_q = scattering_from_positions(pos, d_nm=float(st.session_state["d_nm_rad"]), q=q)
                 fit = fit_guinier_iterative(q, I_q, qmax_init=min(0.06, float(st.session_state["q_max_rad"]) * 0.25))
                 rg_real_nm = compute_rg_from_positions(pos)
-                r_from_center = np.sqrt(np.sum(pos**2, axis=1))
-                Df_fit_radial, _ = fit_mass_fractal_dimension(r_from_center)
                 profile = radial_concentration_profile(pos, R_nm=float(st.session_state["R_nm_rad"]), n_bins=int(st.session_state["n_bins_rad"]))
                 summary = {
                     "R_nm": float(st.session_state["R_nm_rad"]),
-                    "Df_target": float(st.session_state["Df_rad"]),
-                    "Df_fit_radial": float(Df_fit_radial),
-                    "Rg_target_nm": float(st.session_state["Rg_target_rad"]),
-                    "Rg_real_nm": float(rg_real_nm),
-                    "Rg_guinier_nm": float(fit.rg_fit_nm),
-                    "Rg_max_theoretical_nm": float(info["Rg_max_theoretical_nm"]),
-                    "R_eff_nm": float(info["R_eff_nm"]),
+                    "R_shell_nm": float(st.session_state["R_shell_nm_rad"]),
+                    "shell_width_nm_auto": float(info["shell_width_nm_auto"]),
+                    "sigma_shell_nm": float(info["sigma_shell_nm"]),
                     "d_nm": float(st.session_state["d_nm_rad"]),
                     "n_particles": int(st.session_state["n_particles_rad"]),
+                    "r_mean_nm": float(info["r_mean_nm"]),
+                    "r_std_nm": float(info["r_std_nm"]),
+                    "Rg_real_nm": float(rg_real_nm),
+                    "Rg_guinier_nm": float(fit.rg_fit_nm),
                     "Guinier_qmax_nm^-1": float(fit.qmax_used),
+                    "Guinier_n_points": int(fit.n_points),
                 }
 
             st.success("Calculation finished.")
             c1, c2, c3, c4, c5 = st.columns(5)
-            c1.metric("Rg target [nm]", f"{summary['Rg_target_nm']:.2f}")
-            c2.metric("Rg (positions) [nm]", f"{summary['Rg_real_nm']:.2f}")
-            c3.metric("Rg (Guinier) [nm]", f"{summary['Rg_guinier_nm']:.2f}")
-            c4.metric("Df target", f"{summary['Df_target']:.3f}")
-            c5.metric("Df fitted", f"{summary['Df_fit_radial']:.3f}")
+            c1.metric("R_shell target [nm]", f"{summary['R_shell_nm']:.2f}")
+            c2.metric("Shell width auto [nm]", f"{summary['shell_width_nm_auto']:.2f}")
+            c3.metric("Mean radius [nm]", f"{summary['r_mean_nm']:.2f}")
+            c4.metric("Rg (positions) [nm]", f"{summary['Rg_real_nm']:.2f}")
+            c5.metric("Rg (Guinier) [nm]", f"{summary['Rg_guinier_nm']:.2f}")
 
             fig1 = plt.figure(figsize=(4.2, 3.6))
             ax = fig1.add_subplot(111, projection="3d")
@@ -306,7 +309,7 @@ This mode outputs:
             ax.set_xlabel("x [nm]")
             ax.set_ylabel("y [nm]")
             ax.set_zlabel("z [nm]")
-            ax.set_title("Generated particle configuration")
+            ax.set_title("Generated shell-like particle configuration")
             xyz_min = pos.min(axis=0)
             xyz_max = pos.max(axis=0)
             center = 0.5 * (xyz_min + xyz_max)
@@ -332,9 +335,11 @@ This mode outputs:
             with colA:
                 fig3 = plt.figure(figsize=(4.8, 3.4))
                 plt.plot(profile["r_center_nm"], profile["number_density_nm^-3"], marker="o", ms=3)
+                plt.axvline(float(st.session_state["R_shell_nm_rad"]), linestyle="--", lw=1.2, label="R_shell")
                 plt.xlabel("r [nm]")
                 plt.ylabel(r"number density [nm$^{-3}$]")
                 plt.title("Radial number-density profile")
+                plt.legend()
                 plt.tight_layout()
                 st.pyplot(fig3)
                 plt.close(fig3)
@@ -342,9 +347,11 @@ This mode outputs:
             with colB:
                 fig4 = plt.figure(figsize=(4.8, 3.4))
                 plt.plot(profile["r_center_nm"], profile["cumulative_fraction"], marker="o", ms=3)
+                plt.axvline(float(st.session_state["R_shell_nm_rad"]), linestyle="--", lw=1.2, label="R_shell")
                 plt.xlabel("r [nm]")
                 plt.ylabel("cumulative fraction")
                 plt.title("Cumulative fraction profile")
+                plt.legend()
                 plt.tight_layout()
                 st.pyplot(fig4)
                 plt.close(fig4)
@@ -382,13 +389,13 @@ This mode outputs:
 
             st.subheader("Download outputs")
             d1, d2, d3, d4 = st.columns(4)
-            d1.download_button("Positions CSV", positions_csv.getvalue(), file_name="generated_positions_nm.csv", mime="text/csv", use_container_width=True)
-            d2.download_button("I(q) CSV", iq_csv.getvalue(), file_name="scattering_Iq.csv", mime="text/csv", use_container_width=True)
-            d3.download_button("Radial profile CSV", radial_csv.getvalue(), file_name="radial_profile.csv", mime="text/csv", use_container_width=True)
-            d4.download_button("Summary TXT", summary_txt.getvalue(), file_name="radial_profile_summary.txt", mime="text/plain", use_container_width=True)
+            d1.download_button("Positions CSV", positions_csv.getvalue(), file_name="generated_shell_positions_nm.csv", mime="text/csv", use_container_width=True)
+            d2.download_button("I(q) CSV", iq_csv.getvalue(), file_name="shell_scattering_Iq.csv", mime="text/csv", use_container_width=True)
+            d3.download_button("Radial profile CSV", radial_csv.getvalue(), file_name="shell_radial_profile.csv", mime="text/csv", use_container_width=True)
+            d4.download_button("Summary TXT", summary_txt.getvalue(), file_name="shell_radial_profile_summary.txt", mime="text/plain", use_container_width=True)
             st.subheader("Summary")
             st.json(summary)
         except Exception as e:
             st.error(str(e))
     else:
-        st.info("Set parameters in the sidebar and click 'Run Radial Profile'.")
+        st.info("Set parameters in the sidebar and click 'Run Shell-like Radial Profile'.")
