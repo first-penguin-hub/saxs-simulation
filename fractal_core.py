@@ -517,3 +517,127 @@ def generate_shell_like_cluster(
         "R_center_max_nm": float(R_center_max),
     }
     return pos, info
+
+
+def generate_shell_like_cluster_with_target_rg(
+    R_nm: float,
+    Rg_target_nm: float,
+    d_nm: float,
+    n_particles: int,
+    seed: int = 2026,
+    max_trials: int = 500000,
+    shell_width_factor: float = 2.0,
+    rg_tolerance_nm: float = 2.0,
+    search_max_iter: int = 12,
+    n_replicates: int = 3,
+) -> Tuple[np.ndarray, Dict[str, float]]:
+    """
+    Generate a shell-like particle configuration controlled by target Rg.
+
+    User inputs are R_nm, Rg_target_nm, d_nm, and n_particles. The shell width is
+    fixed internally as shell_width = shell_width_factor * d_nm, and R_shell is
+    tuned automatically so that the generated coordinate Rg approaches Rg_target_nm.
+    """
+    if Rg_target_nm <= 0:
+        raise ValueError("Rg_target_nm must be positive.")
+    if R_nm <= 0:
+        raise ValueError("R_nm must be positive.")
+    if d_nm <= 0:
+        raise ValueError("d_nm must be positive.")
+    if d_nm >= 2 * R_nm:
+        raise ValueError("Particle diameter is too large for the chosen container radius.")
+
+    R_center_max = R_nm - d_nm / 2.0
+    shell_width_nm = shell_width_factor * d_nm
+    sigma_shell_nm = shell_width_nm / 2.0
+    Rg_max_approx = np.sqrt(R_center_max**2 + sigma_shell_nm**2)
+    if Rg_target_nm > Rg_max_approx:
+        raise ValueError(
+            f"Requested Rg_target={Rg_target_nm:.3f} nm is too large for this container. "
+            f"Approximate maximum is {Rg_max_approx:.3f} nm. Increase R or decrease d."
+        )
+
+    def eval_rshell(rshell: float, base_seed: int) -> Tuple[float, np.ndarray, Dict[str, float]]:
+        rgs = []
+        poss = []
+        infos = []
+        for j in range(n_replicates):
+            try:
+                pos_j, info_j = generate_shell_like_cluster(
+                    R_nm=R_nm,
+                    R_shell_nm=rshell,
+                    d_nm=d_nm,
+                    n_particles=n_particles,
+                    seed=base_seed + 997 * j,
+                    max_trials=max_trials,
+                    shell_width_factor=shell_width_factor,
+                )
+            except RuntimeError:
+                continue
+            poss.append(pos_j)
+            infos.append(info_j)
+            rgs.append(compute_rg_from_positions(pos_j))
+        if not rgs:
+            raise RuntimeError(
+                f"Could not generate a non-overlapping shell-like configuration at R_shell={rshell:.3f} nm. "
+                "Increase R, reduce n or d, or increase max_trials."
+            )
+        order = np.argsort(rgs)
+        mid = int(order[len(order) // 2])
+        return float(np.median(rgs)), poss[mid], infos[mid]
+
+    rshell_guess = np.sqrt(max(Rg_target_nm**2 - sigma_shell_nm**2, 0.0))
+    rshell_guess = float(np.clip(rshell_guess, 0.0, R_center_max))
+
+    best_pos = None
+    best_info = None
+    best_rshell = None
+    best_rg = None
+    best_err = np.inf
+
+    for idx, rs in enumerate([0.0, rshell_guess, R_center_max]):
+        try:
+            rg, pos, info = eval_rshell(rs, seed + 10000 * (idx + 1))
+        except RuntimeError:
+            continue
+        err = abs(rg - Rg_target_nm)
+        if err < best_err:
+            best_err = err
+            best_pos = pos
+            best_info = info
+            best_rshell = rs
+            best_rg = rg
+
+    if best_pos is None:
+        raise RuntimeError("Could not generate any feasible initial shell-like configuration.")
+
+    low, high = 0.0, R_center_max
+    performed_iter = 0
+    if best_err > rg_tolerance_nm:
+        for it in range(search_max_iter):
+            performed_iter = it + 1
+            mid = 0.5 * (low + high)
+            rg_mid, pos_mid, info_mid = eval_rshell(mid, seed + 30000 + 1000 * it)
+            err_mid = abs(rg_mid - Rg_target_nm)
+            if err_mid < best_err:
+                best_err = err_mid
+                best_pos = pos_mid
+                best_info = info_mid
+                best_rshell = mid
+                best_rg = rg_mid
+            if err_mid <= rg_tolerance_nm:
+                break
+            if rg_mid < Rg_target_nm:
+                low = mid
+            else:
+                high = mid
+
+    best_info.update({
+        "Rg_target_nm": float(Rg_target_nm),
+        "Rg_generated_nm": float(best_rg),
+        "Rg_error_nm": float(best_rg - Rg_target_nm),
+        "R_shell_optimized_nm": float(best_rshell),
+        "Rg_max_approx_nm": float(Rg_max_approx),
+        "search_iterations": int(performed_iter),
+    })
+    return best_pos, best_info
